@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Automated Image Extractor</title>
+    <!-- Load Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom styles */
+        .container {
+            max-width: 900px;
+        }
+        /* Hide the canvas elements used for rendering */
+        .page-canvas {
+            display: none; 
+        }
+        /* Styling for the modal/cropping tool */
+        .modal {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.75);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+        .modal-content {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            max-width: 90vw;
+            max-height: 90vh;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .cropper-container {
+            flex-grow: 1; /* Fixed typo from flex-grow = 1 */
+            min-height: 300px;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            position: relative;
+        }
+        .cropper-box {
+            max-width: 100%;
+            max-height: 100%;
+        }
+    </style>
+    <!-- Load Cropper.js for image cropping -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css" />
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.js"></script>
+    <!-- Load JSZip for creating ZIP files -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+</head>
+<body class="bg-gray-50 font-sans p-4 sm:p-8">
+
+    <div class="container mx-auto bg-white shadow-xl rounded-2xl p-6 md:p-10">
+        <h1 class="text-3xl font-bold text-indigo-700 mb-2">Ed's Incredible Automated Image Extractor</h1>
+        <p class="text-gray-600 mb-6">
+            This tool uses my last two brain cells to find and extract photos from all pages of your PDF(s).
+        </p>
+
+        <!-- File Input and Action Area -->
+        <div class="space-y-4">
+            <!-- ADDED 'multiple' ATTRIBUTE HERE -->
+            <input 
+                type="file" 
+                id="pdfFileInput" 
+                accept=".pdf" 
+                multiple
+                class="block w-full text-sm text-gray-900 border border-gray-300 rounded-lg cursor-pointer bg-gray-50 focus:outline-none p-2"
+            >
+            <div class="flex flex-col sm:flex-row gap-3">
+                <button 
+                    id="extractButton" 
+                    onclick="extractPages('auto')" 
+                    disabled
+                    class="w-full px-6 py-3 bg-red-600 text-white font-semibold rounded-xl shadow-lg hover:bg-red-700 transition duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                    Start Automatic Image Extraction
+                </button>
+            </div>
+        </div>
+
+        <!-- Status and Output Area -->
+        <div class="mt-8">
+            <p id="statusMessage" class="text-lg font-medium text-gray-700"></p>
+            
+            <!-- Download All Button Container (Updated with two distinct buttons) -->
+            <div id="downloadAllContainer" class="mt-4 hidden space-y-3">
+                <button 
+                    onclick="downloadAllAsIndividual()" 
+                    class="w-full px-6 py-3 bg-indigo-600 text-white font-semibold rounded-xl shadow-lg hover:bg-indigo-700 transition duration-300"
+                >
+                    Download All As Individual Pictures
+                </button>
+                <button 
+                    onclick="downloadAllAsZip()" 
+                    class="w-full px-6 py-3 bg-pink-600 text-white font-semibold rounded-xl shadow-lg hover:bg-pink-700 transition duration-300"
+                >
+                    Download All As Zip
+                </button>
+                <hr class="my-4 border-gray-300">
+            </div>
+
+            <div id="outputArea" class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4" style="min-height: 50px;">
+                <!-- Output will appear here -->
+            </div>
+
+            <!-- Canvas elements used by pdf.js for rendering (hidden) -->
+            <div id="canvasContainer" class="hidden"></div>
+        </div>
+    </div>
+
+    <!-- Modal for Cropping (Kept hidden in case the automatic feature fails on other PDFs) -->
+    <div id="croppingModal" class="modal hidden">
+        <div class="modal-content w-11/12 sm:w-4/5 md:w-3/5 lg:w-2/3">
+            <h2 class="text-xl font-bold text-indigo-700">Crop Your Photo</h2>
+            <p class="text-gray-600 text-sm">Drag the box to select the area you want to save. The window will stay open to let you select the next photo.</p>
+            <p id="cropFeedback" class="text-sm text-green-700 font-medium pt-1 hidden"></p>
+            <div class="cropper-container">
+                <!-- Cropper image will be inserted here -->
+            </div>
+            <div class="flex flex-col sm:flex-row justify-end gap-3 pt-2">
+                <button 
+                    onclick="cropAndDownload()" 
+                    class="px-4 py-2 bg-green-500 text-white font-semibold rounded-lg hover:bg-green-600 transition duration-300"
+                >
+                    Save & Start Next Crop
+                </button>
+                <button 
+                    onclick="closeCropper()" 
+                    class="px-4 py-2 bg-gray-300 text-gray-800 font-semibold rounded-lg hover:bg-gray-400 transition duration-300"
+                >
+                    Close Cropping Tool
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Load PDF.js library -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.js"></script>
+
+    <script>
+        // Set up the PDF.js worker path
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.js';
+
+        const fileInput = document.getElementById('pdfFileInput');
+        const extractButton = document.getElementById('extractButton'); 
+        const statusMessage = document.getElementById('statusMessage');
+        const outputArea = document.getElementById('outputArea');
+        const canvasContainer = document.getElementById('canvasContainer');
+        const croppingModal = document.getElementById('croppingModal');
+        const cropFeedback = document.getElementById('cropFeedback');
+        const downloadAllContainer = document.getElementById('downloadAllContainer'); 
+
+        let currentCropper = null;
+        let originalFileName = 'image';
+        let originalPageNum = 0;
+        let cropCounter = 0; 
+
+        let extractedImages = []; 
+
+        // Use a high scale for rendering to ensure image quality
+        const RENDER_SCALE = 2.5; 
+        const COLOR_THRESHOLD = 240; // Pixels brighter than this are considered "white"
+
+        // Enable button once a file is selected
+        fileInput.addEventListener('change', () => {
+            const fileCount = fileInput.files.length;
+            
+            // FIX: Explicitly check file count to enable/disable the button
+            if (fileCount > 0) {
+                extractButton.disabled = false; // ENABLED when 1 or more files are selected
+                statusMessage.textContent = `Ready to process ${fileCount} PDF file(s).`;
+            } else {
+                extractButton.disabled = true; // DISABLED when 0 files are selected
+                statusMessage.textContent = '';
+            }
+
+            outputArea.innerHTML = '';
+            downloadAllContainer.classList.add('hidden');
+        });
+
+        // --- Cropping Modal Functions (Kept but not used in this mode) ---
+
+        function openCropper(imageDataURL, fileName, pageNum) {
+            originalFileName = fileName;
+            originalPageNum = pageNum;
+            cropCounter = 0; 
+            cropFeedback.classList.add('hidden'); 
+
+            const cropperContainer = croppingModal.querySelector('.cropper-container');
+            cropperContainer.innerHTML = ''; 
+            const cropperImage = document.createElement('img');
+            cropperImage.id = 'cropperImage';
+            cropperImage.className = 'cropper-box';
+            cropperImage.src = imageDataURL;
+            cropperImage.alt = "Image to Crop";
+            cropperContainer.appendChild(cropperImage);
+            
+            croppingModal.classList.remove('hidden');
+
+            currentCropper = new Cropper(cropperImage, {
+                aspectRatio: NaN, 
+                viewMode: 1,      
+                autoCropArea: 0.8 
+            });
+        }
+
+        function closeCropper() {
+            if (currentCropper) {
+                currentCropper.destroy();
+                currentCropper = null;
+            }
+            croppingModal.classList.add('hidden');
+        }
+
+        function cropAndDownload() {
+            if (!currentCropper) return;
+
+            const croppedDataUrl = currentCropper.getCroppedCanvas().toDataURL('image/jpeg', 0.95);
+            
+            const link = document.createElement('a');
+            cropCounter++;
+            const baseName = originalFileName.replace(/\.pdf$/i, '');
+            link.download = `${baseName}_P${originalPageNum}_Crop${cropCounter}.jpg`; 
+            link.href = croppedDataUrl;
+            
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+
+            // Reset the cropper for the next picture (continuous mode)
+            currentCropper.clear();
+            currentCropper.crop();
+
+            cropFeedback.textContent = `Photo ${cropCounter} saved! Select the next area on the page.`;
+            cropFeedback.classList.remove('hidden');
+
+            setTimeout(() => {
+                 cropFeedback.classList.add('hidden');
+            }, 5000);
+        }
+        
+        // --- Bulk Download Functions ---
+        
+        // Function to download all extracted images individually (renamed)
+        function downloadAllAsIndividual() {
+            if (extractedImages.length === 0) {
+                statusMessage.textContent = 'No images found to download!';
+                return;
+            }
+
+            statusMessage.textContent = `Starting download of ${extractedImages.length} images... (Your browser may ask for permission or warn you about multiple files)`;
+
+            extractedImages.forEach((image, index) => {
+                // Delay each download slightly to help browsers handle multiple requests
+                setTimeout(() => {
+                    const link = document.createElement('a');
+                    link.download = image.filename; 
+                    link.href = image.dataUrl;
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                    
+                    if (index === extractedImages.length - 1) {
+                        // Final status update after the last download is triggered
+                        setTimeout(() => {
+                            statusMessage.textContent = `Finished triggering ${extractedImages.length} downloads! Check your downloads folder.`;
+                        }, 1000);
+                    }
+                }, index * 200); // 200ms delay between download starts
+            });
+        }
+        
+        // Function to download all extracted images as a single ZIP file (NEW)
+        async function downloadAllAsZip() {
+            if (extractedImages.length === 0) {
+                statusMessage.textContent = 'No images found to zip!';
+                return;
+            }
+
+            statusMessage.textContent = `Preparing ${extractedImages.length} images for ZIP download. This might take a moment...`;
+            extractButton.disabled = true; 
+            
+            const zip = new JSZip();
+            const folder = zip.folder("extracted_images");
+            
+            extractedImages.forEach(image => {
+                // image.dataUrl format: data:image/jpeg;base64,...
+                // Strip the header for JSZip, which needs the base64 part
+                const base64Data = image.dataUrl.split(',')[1];
+                
+                // Add the file to the zip folder using 'base64' type
+                folder.file(image.filename, base64Data, {base64: true});
+            });
+
+            // Generate the ZIP file
+            try {
+                const content = await zip.generateAsync({type: "blob"});
+                
+                // Trigger the download
+                const link = document.createElement('a');
+                link.download = 'pdf_extracted_images.zip';
+                link.href = URL.createObjectURL(content);
+                
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                
+                statusMessage.textContent = `ZIP file containing ${extractedImages.length} images is ready! Check your downloads folder.`;
+
+            } catch (error) {
+                console.error("Error generating ZIP file:", error);
+                statusMessage.textContent = 'An error occurred while creating the ZIP file. Check the console for details.';
+            } finally {
+                extractButton.disabled = false;
+            }
+        }
+
+
+        // --- Core Automated Detection Logic (Experimental) ---
+
+        /**
+         * Checks if a pixel is considered "white" based on a brightness threshold.
+         */
+        function isWhite(r, g, b) {
+            return r > COLOR_THRESHOLD && g > COLOR_THRESHOLD && b > COLOR_THRESHOLD;
+        }
+
+        /**
+         * Scans the canvas pixel data to find boundaries of large, continuous, non-white rectangles.
+         */
+        function detectImageBoundaries(context, width, height) {
+            const imageData = context.getImageData(0, 0, width, height);
+            const data = imageData.data;
+            const boxes = [];
+            const minSize = 100 * RENDER_SCALE; // Minimum size for a detected object
+
+            const visited = new Array(width * height).fill(false);
+
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    const i = (y * width + x) * 4;
+                    const isPixelWhite = isWhite(data[i], data[i+1], data[i+2]);
+                    
+                    // Start of a potential object if it's not white and not visited
+                    if (!isPixelWhite && !visited[y * width + x]) {
+                        let minX = width, minY = height, maxX = 0, maxY = 0;
+                        let stack = [{x, y}];
+                        
+                        // Basic flood fill/expansion to find the connected, non-white area
+                        while (stack.length > 0) {
+                            const current = stack.pop();
+                            const index = current.y * width + current.x;
+
+                            if (current.x < 0 || current.x >= width || current.y < 0 || current.y >= height || visited[index]) {
+                                continue;
+                            }
+                            
+                            const i4 = index * 4;
+                            if (isWhite(data[i4], data[i4+1], data[i4+2])) {
+                                continue;
+                            }
+
+                            visited[index] = true;
+                            
+                            minX = Math.min(minX, current.x);
+                            minY = Math.min(minY, current.y);
+                            maxX = Math.max(maxX, current.x);
+                            maxY = Math.max(maxY, current.y);
+                            
+                            // Check neighbors (using a simplified 4-neighbor check to prevent stack overflow)
+                            stack.push({x: current.x + 1, y: current.y});
+                            stack.push({x: current.x - 1, y: current.y});
+                            stack.push({x: current.x, y: current.y + 1});
+                            stack.push({x: current.x, y: current.y - 1});
+                        }
+                        
+                        const w = maxX - minX;
+                        const h = maxY - minY;
+
+                        // Only consider large objects (likely photos)
+                        if (w > minSize && h > minSize) {
+                            boxes.push({x: minX, y: minY, w: w, h: h});
+                        }
+                    }
+                }
+            }
+            return boxes;
+        }
+
+        async function segmentAndExtract(pdf, page, pageNum, pdfFileName) {
+            // 1. Render the entire page to a hidden canvas
+            const viewport = page.getViewport({ scale: RENDER_SCALE });
+            const canvas = document.createElement('canvas');
+            canvas.width = viewport.width;
+            canvas.height = viewport.height;
+            const context = canvas.getContext('2d');
+            
+            await page.render({ canvasContext: context, viewport: viewport }).promise;
+
+            // 2. Detect the boundaries of the image blocks
+            const detectedBoxes = detectImageBoundaries(context, canvas.width, canvas.height);
+
+            let photoCount = 0;
+            if (detectedBoxes.length === 0) {
+                return 0;
+            }
+
+            for (const [index, box] of detectedBoxes.entries()) {
+                const croppedCanvas = document.createElement('canvas');
+                croppedCanvas.width = box.w;
+                croppedCanvas.height = box.h;
+                const croppedContext = croppedCanvas.getContext('2d');
+
+                // Draw only the detected area onto the new canvas
+                croppedContext.drawImage(
+                    canvas, 
+                    box.x, box.y, box.w, box.h, // Source rectangle (on the original canvas)
+                    0, 0, box.w, box.h          // Destination rectangle (on the cropped canvas)
+                );
+
+                const imageDataURL = croppedCanvas.toDataURL('image/jpeg', 0.95);
+                
+                // Prepare filename
+                const baseName = pdfFileName.replace(/\.pdf$/i, '');
+                const filename = `${baseName}_P${pageNum}_AutoCrop${index + 1}.jpg`; 
+
+                // Store data for bulk download
+                extractedImages.push({
+                    dataUrl: imageDataURL,
+                    filename: filename
+                });
+
+                // Create the card for visual confirmation and individual download
+                const card = createAutoDownloadCard(imageDataURL, pageNum, index + 1, filename);
+                outputArea.appendChild(card);
+                
+                photoCount++;
+            }
+            return photoCount;
+        }
+
+        // --- Main Extraction Flow (Updated for All Pages) ---
+
+        async function extractPages(mode) {
+            const files = fileInput.files;
+            if (files.length === 0) return;
+
+            // Reset global state for new run
+            outputArea.innerHTML = '';
+            extractedImages = [];
+            downloadAllContainer.classList.add('hidden'); 
+            
+            extractButton.disabled = true;
+            canvasContainer.innerHTML = ''; 
+
+            let totalSuccessCount = 0;
+            let fileCount = files.length;
+
+            for (let i = 0; i < fileCount; i++) {
+                const file = files[i];
+                statusMessage.textContent = `Processing PDF ${i + 1} of ${fileCount}: ${file.name}...`;
+
+                try {
+                    const arrayBuffer = await file.arrayBuffer();
+                    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+                    const numPages = pdf.numPages;
+
+                    // UPDATED: Start from page 1 and go to the last page
+                    const startPageNum = 1; 
+                    const endPageNum = numPages;                     
+
+                    // Detailed status update
+                    statusMessage.textContent = `Processing PDF ${i + 1}/${fileCount} (${file.name}): Checking all ${numPages} pages...`;
+                    
+                    for (let pageNum = startPageNum; pageNum <= endPageNum; pageNum++) {
+                        // Update status inside the loop to show progress
+                        statusMessage.textContent = `Processing PDF ${i + 1}/${fileCount} (${file.name}): Scanning page ${pageNum} of ${numPages}...`;
+
+                        const page = await pdf.getPage(pageNum);
+                        
+                        if (mode === 'auto') {
+                            totalSuccessCount += await segmentAndExtract(pdf, page, pageNum, file.name);
+                        } 
+                    }
+                } catch (error) {
+                    console.error(`PDF Processing Error for ${file.name}:`, error);
+                    statusMessage.textContent = `An error occurred while processing ${file.name}: ${error.message}. Continuing with the next file...`;
+                    // Brief delay to allow the user to read the error message for the failed file
+                    await new Promise(resolve => setTimeout(resolve, 2000)); 
+                }
+            }
+            
+            // Final status update after the loop
+            if (totalSuccessCount > 0) {
+                downloadAllContainer.classList.remove('hidden');
+                statusMessage.textContent = `Finished processing ${fileCount} PDF(s)! Automatically detected ${totalSuccessCount} photo(s). Use the download buttons above or save them individually below.`;
+            } else {
+                statusMessage.textContent = `Finished processing ${fileCount} PDF(s)! No distinct photos were found with the automatic method in any of the files.`;
+            }
+
+            extractButton.disabled = false;
+        }
+        
+        // --- Output Card Generators ---
+        
+        function createAutoDownloadCard(dataUrl, pageNum, imageIndex, downloadFilename) {
+            const div = document.createElement('div');
+            div.className = 'bg-gray-100 p-4 rounded-xl shadow-md flex flex-col items-center';
+            
+            div.innerHTML = `
+                <h3 class="font-semibold text-center text-red-600 mb-3">Auto-Detected - P${pageNum} - Photo ${imageIndex}</h3>
+                <img 
+                    src="${dataUrl}" 
+                    alt="Extracted Photo ${imageIndex}" 
+                    class="rounded-lg mb-3 border border-gray-300 shadow-inner max-w-full max-h-56 object-contain"
+                >
+                <a 
+                    href="${dataUrl}" 
+                    download="${downloadFilename}" 
+                    class="block text-center w-full mt-2 px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 transition duration-300 font-medium"
+                >
+                    Download Individual File
+                </a>
+            `;
+            return div;
+        }
+
+        function createPageCard(dataUrl, pageNum, pdfFileName) {
+            const div = document.createElement('div');
+            div.className = 'bg-gray-100 p-4 rounded-xl shadow-md flex flex-col items-center justify-between';
+            
+            div.innerHTML = `
+                <h3 class="font-semibold text-center text-indigo-600 mb-3">Page ${pageNum} Preview (Manual Mode)</h3>
+                <img 
+                    src="${dataUrl}" 
+                    alt="Rendered Page ${pageNum}" 
+                    class="w-full h-auto rounded-lg mb-4 border border-gray-300 shadow-inner max-h-56 object-contain"
+                >
+                <button 
+                    onclick="openCropper('${dataUrl}', '${pdfFileName}', ${pageNum})" 
+                    class="block text-center w-full px-4 py-2 bg-green-500 text-white rounded-lg font-semibold hover:bg-green-600 transition duration-300"
+                >
+                    Crop Photo from this Page
+                </button>
+            `;
+            return div;
+        }
+
+    </script>
+</body>
+</html>
